@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+    <meta charset="UTF-8">
+    <title>Πορτοφολάκι</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            color: #222;
+            max-width: 600px;
+            margin: 60px auto;
+            padding: 0 20px;
+            line-height: 1.6;
+        }
+
+        h1 {
+            color: #1a7a3c;
+        }
+
+        h2 {
+            color: #555;
+            border-bottom: 2px solid #1a7a3c;
+            padding-bottom: 5px;
+        }
+
+        ul {
+            padding-left: 20px;
+        }
+
+        li {
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Πορτοφολάκι</h1>
+    <p>Καλωσήρθες στη σελίδα μου! Ασχολούμαι με AI και επιχειρηματικότητα.</p>
+
+    <h2>Τι με ενδιαφέρει</h2>
+    <ul>
+        <li>Τεχνητή Νοημοσύνη (AI)</li>
+        <li>Επιχειρηματικότητα (Entrepreneurship)</li>
+    </ul>
+
+    <h2>Επικοινωνία</h2>
+    <p>Βρες με εδώ: <a href="mailto:stpg1205@gmail.com">stpg1205@gmail.com</a></p>
+
+    <h2>AI Quiz</h2>
+    <p id="erotisi"></p>
+    <div id="apantiseis"></div>
+    <p id="apotelesma"></p>
+    <button onclick="epomeniErotisi()">Επόμενη ερώτηση</button>
+
+    <script>
+        const erotiseis = [
+            {
+                keimeno: "Τι σημαίνει το 'AI';",
+                epiloges: ["Artificial Intelligence", "Automatic Internet", "Advanced Interface"],
+                sosti: 0
+            },
+            {
+                keimeno: "Ποια εταιρεία έφτιαξε το Claude;",
+                epiloges: ["OpenAI", "Anthropic", "Google"],
+                sosti: 1
+            },
+            {
+                keimeno: "Τι είναι το 'machine learning';",
+                epiloges: ["Ρομπότ που μαθαίνουν να περπατάνε", "Υπολογιστές που φτιάχνουν μηχανές", "Συστήματα που μαθαίνουν από δεδομένα"],
+                sosti: 2
+            },
+            {
+                keimeno: "Τι σημαίνει 'MVP' στο entrepreneurship;",
+                epiloges: ["Most Valuable Player", "Minimum Viable Product", "Major Venture Partnership"],
+                sosti: 1
+            },
+            {
+                keimeno: "Τι είναι το 'bootstrapping' σε μια startup;",
+                epiloges: ["Χτίζεις την επιχείρηση με δικά σου χρήματα, χωρίς επενδυτές", "Παίρνεις δάνειο από τράπεζα", "Πουλάς μετοχές στο χρηματιστήριο"],
+                sosti: 0
+            },
+            {
+                keimeno: "Τι είναι το 'pitch deck';",
+                epiloges: ["Το γραφείο μιας startup", "Μια σύντομη παρουσίαση της ιδέας σε επενδυτές", "Το πρώτο προϊόν μιας εταιρείας"],
+                sosti: 1
+            }
+        ];
+
+        let trexonIndex = 0;
+        let skor = 0;
+
+        function deixeErotisi() {
+            const erotisi = erotiseis[trexonIndex];
+            document.getElementById("erotisi").textContent = erotisi.keimeno;
+
+            const diaContainer = document.getElementById("apantiseis");
+            diaContainer.innerHTML = "";
+
+            erotisi.epiloges.forEach(function(epilogi, index) {
+                const koumpi = document.createElement("button");
+                koumpi.textContent = epilogi;
+                koumpi.onclick = function() {
+                    elegxeApantisi(index);
+                };
+                diaContainer.appendChild(koumpi);
+            });
+
+            document.getElementById("apotelesma").textContent = "";
+        }
+
+        function elegxeApantisi(epilegmenoIndex) {
+            const erotisi = erotiseis[trexonIndex];
+
+            if (epilegmenoIndex === erotisi.sosti) {
+                document.getElementById("apotelesma").textContent = "Σωστά! ✅";
+                skor = skor + 1;
+            } else {
+                document.getElementById("apotelesma").textContent = "Λάθος ❌";
+            }
+        }
+
+        function epomeniErotisi() {
+            trexonIndex = trexonIndex + 1;
+
+            if (trexonIndex >= erotiseis.length) {
+                document.getElementById("erotisi").textContent = "Τέλος! Σκορ: " + skor + " / " + erotiseis.length;
+                document.getElementById("apantiseis").innerHTML = "";
+                document.getElementById("apotelesma").textContent = "";
+                trexonIndex = 0;
+                skor = 0;
+            } else {
+                deixeErotisi();
+            }
+        }
+
+        deixeErotisi();
+    </script>
+
+</body>
+</html>
