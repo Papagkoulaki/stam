@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ring Racer</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:Consolas,Menlo,monospace;user-select:none}
+  canvas{display:block}
+  #gl{filter:saturate(1.14) contrast(1.05)}
+  #vig{position:fixed;inset:0;pointer-events:none;z-index:5;
+       background:radial-gradient(ellipse at 50% 45%, transparent 58%, rgba(6,8,18,.38) 100%)}
+  #hud{position:fixed;top:12px;left:14px;color:#fff;font-size:15px;line-height:1.5;text-shadow:0 1px 3px #000;z-index:6}
+  #hud b{color:#ffd24d}
+  #mode{position:fixed;bottom:12px;left:14px;color:#9fe870;font-size:13px;background:rgba(0,0,0,.45);padding:4px 10px;border-radius:4px;z-index:6}
+  #speed{position:fixed;bottom:14px;right:18px;color:#fff;font-size:42px;font-weight:bold;text-shadow:0 2px 6px #000;text-align:right;z-index:6}
+  #speed span{font-size:16px;font-weight:normal;color:#bbb}
+  #gear{font-size:17px;color:#9fe870}
+  #map{position:fixed;top:12px;right:12px;background:rgba(0,0,0,.35);border-radius:6px;z-index:6}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+         background:rgba(5,10,20,.82);color:#fff;text-align:center;z-index:10}
+  #start h1{font-size:44px;margin:0 0 8px;color:#9fe870;letter-spacing:4px}
+  #start p{margin:4px 0;color:#ccc;font-size:14px}
+  #start .go{margin-top:26px;font-size:20px;color:#ffd24d;animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="vig"></div>
+<div id="hud">
+  LAP <b id="lapN">0</b><br>
+  TIME <b id="lapT">--:--.---</b><br>
+  BEST <b id="bestT">--:--.---</b>
+</div>
+<canvas id="map" width="190" height="230"></canvas>
+<div id="speed">0<span> km/h</span><br><span id="gear">N</span></div>
+<div id="mode">KEYBOARD</div>
+<div id="start">
+  <h1>RING RACER</h1>
+  <p>A lap of the green hell (approximately)</p>
+  <p style="margin-top:18px">Keyboard: WASD / arrows &nbsp;·&nbsp; Space handbrake &nbsp;·&nbsp; R reset</p>
+  <p>Gamepad: left stick steer · R2 throttle · L2 brake · X handbrake</p>
+  <p>Wheel: axis 0 steer · pedals auto-detected (press throttle first, then brake)</p>
+  <p style="color:#889">Sound needs one click or key press (browser autoplay rule)</p>
+  <div class="go">— PRESS ANY INPUT TO START —</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+// ================= SCENE / RENDERER =================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xc3d6e2);
+scene.fog = new THREE.Fog(0xc3d6e2, 300, 1600);
+const camera = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.1, 2600);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.92;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.domElement.id = 'gl';
+document.body.appendChild(renderer.domElement);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+scene.add(new THREE.HemisphereLight(0xd6e9ff, 0x2e4a22, 0.6));
+const sun = new THREE.DirectionalLight(0xfff0dc, 1.15);
+const SUN_DIR = new THREE.Vector3(0.45, 0.8, 0.3).normalize();
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, {left:-75, right:75, top:75, bottom:-75, near:5, far:900});
+sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0004;
+scene.add(sun, sun.target);
+{ // gradient sky dome
+  const geo = new THREE.SphereGeometry(2000, 24, 12);
+  const n = geo.attributes.position.count, cols = new Float32Array(n*3);
+  const top = new THREE.Color(0x3f74ad), hor = new THREE.Color(0xc8dce8), c = new THREE.Color();
+  for (let i = 0; i < n; i++) {
+    const t = Math.pow(THREE.MathUtils.clamp(geo.attributes.position.getY(i)/2000, 0, 1), 0.6);
+    c.copy(hor).lerp(top, t);
+    cols[i*3] = c.r; cols[i*3+1] = c.g; cols[i*3+2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  const sky = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({vertexColors:true, side:THREE.BackSide, fog:false, depthWrite:false}));
+  sky.renderOrder = -10;
+  scene.add(sky);
+}
+
+// procedural canvas textures — noise + blotches, no downloads
+function noiseTex(base, vary) {
+  const w = 256, cv = document.createElement('canvas');
+  cv.width = cv.height = w;
+  const x = cv.getContext('2d');
+  x.fillStyle = base; x.fillRect(0, 0, w, w);
+  for (let i = 0; i < 90; i++) {
+    x.fillStyle = 'rgba(0,0,0,' + (0.015 + Math.random()*0.03) + ')';
+    x.beginPath(); x.arc(Math.random()*w, Math.random()*w, 4 + Math.random()*14, 0, 7); x.fill();
+  }
+  const img = x.getImageData(0, 0, w, w), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const nz = (Math.random() - 0.5)*vary;
+    d[i] += nz; d[i+1] += nz; d[i+2] += nz;
+  }
+  x.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+const asphaltTex = noiseTex('#4e4e57', 30);
+const grassTex = noiseTex('#4a7239', 32);
+const groundDetail = noiseTex('#96a18c', 26);   // neutral; terrain hue comes from vertex colors
+groundDetail.repeat && groundDetail.repeat.set(1, 1);
+
+// ================= TRACK =================
+// Control points loosely following the Nordschleife's flow: start straight,
+// esses, downhill valley, low point, long climb, banked hairpin (Karussell-ish),
+// high point, downhill wiggles, long return straight. Not real coordinates.
+const S = 0.8, GROUND_Y = -2, HALF_W = 6.5, VERGE = HALF_W + 7;
+const P = [
+  [900,12,0],[560,14,-40],[350,18,-20],[250,20,-60],[150,22,-10],[50,26,-50],
+  [-100,32,-30],[-300,34,-80],[-500,30,-60],[-650,24,-140],[-600,16,-260],
+  [-500,6,-380],[-560,10,-500],[-480,12,-560],[-560,14,-650],[-660,10,-740],
+  [-580,4,-840],[-460,6,-880],[-320,14,-820],[-180,26,-860],[-60,36,-800],
+  [-20,42,-900],[30,44,-960],[110,46,-900],[160,52,-800],[260,56,-840],
+  [350,50,-760],[300,46,-680],[420,40,-640],[520,36,-700],[640,30,-620],
+  [700,26,-500],[640,24,-420],[760,20,-380],[860,16,-260],[880,13,-100]
+];
+const curve = new THREE.CatmullRomCurve3(P.map(p => new THREE.Vector3(p[0]*S, p[1], p[2]*S)), true, 'centripetal', 0.5);
+curve.arcLengthDivisions = 3000;
+const N = 2000;
+const sPos = [], sTan = [], sLat = [], sK = new Float32Array(N); // center, tangent, banked right-vector, curvature
+{
+  for (let i = 0; i < N; i++) sPos.push(curve.getPointAt(i/N));
+  const blur = (get, set, W) => {          // wrap-aware box blur
+    const out = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let s = 0;
+      for (let j = -W; j <= W; j++) s += get((i+j+N)%N);
+      out[i] = s/(2*W+1);
+    }
+    for (let i = 0; i < N; i++) set(i, out[i]);
+  };
+  blur(i => sPos[i].y, (i,v) => sPos[i].y = v, 18);  // soften crests/dips (~±40 m)
+  for (let i = 0; i < N; i++)                        // tangents from smoothed positions
+    sTan.push(sPos[(i+1)%N].clone().sub(sPos[(i-1+N)%N]).normalize());
+  const kap = new Float32Array(N);                   // signed curvature, >0 = left turn
+  for (let i = 0; i < N; i++) {
+    const a = sTan[i], b = sTan[(i+1)%N];
+    const ds = sPos[i].distanceTo(sPos[(i+1)%N]);
+    kap[i] = -(a.z*b.x - a.x*b.z) / Math.max(ds, 0.01);
+  }
+  blur(i => kap[i], (i,v) => sK[i] = v, 20);
+  for (let i = 0; i < N; i++) {
+    const t = sTan[i];
+    const right = new THREE.Vector3(-t.z, 0, t.x).normalize();
+    const bank = THREE.MathUtils.clamp(sK[i]*18, -0.32, 0.32); // outer edge rises in turns
+    sLat.push(right.multiplyScalar(Math.cos(bank)).add(new THREE.Vector3(0, Math.sin(bank), 0)));
+  }
+}
+const sArc = new Float32Array(N+1);
+for (let i = 0; i < N; i++) sArc[i+1] = sArc[i] + sPos[i].distanceTo(sPos[(i+1)%N]);
+
+// strip between lateral offsets o0..o1; seam row duplicated so UVs don't wrap
+function ribbon(o0, o1, lift, mat, colorFn) {
+  const pos = [], col = [], uv = [], idx = [];
+  for (let i = 0; i <= N; i++) {
+    const k = i%N, c = sPos[k], l = sLat[k];
+    pos.push(c.x+l.x*o0, c.y+l.y*o0+lift, c.z+l.z*o0,
+             c.x+l.x*o1, c.y+l.y*o1+lift, c.z+l.z*o1);
+    uv.push(o0/6, sArc[i]/6, o1/6, sArc[i]/6);
+    if (colorFn) {
+      const cc = colorFn(k);
+      col.push(cc.r, cc.g, cc.b, cc.r, cc.g, cc.b);
+    }
+    if (i < N) {
+      const a = i*2, b = (i+1)*2;
+      idx.push(a, a+1, b, a+1, b+1, b);   // wound so normals face up
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  if (colorFn) g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const m = new THREE.Mesh(g, mat);
+  m.receiveShadow = true;
+  return m;
+}
+function wall(o, h0, h1, color) {           // vertical ribbon (armco) at lateral offset o
+  const pos = [], idx = [];
+  for (let i = 0; i < N; i++) {
+    const c = sPos[i], l = sLat[i];
+    pos.push(c.x+l.x*o, c.y+h0, c.z+l.z*o, c.x+l.x*o, c.y+h1, c.z+l.z*o);
+    const a = i*2, b = ((i+1)%N)*2;
+    idx.push(a, b, a+1, b, b+1, a+1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, new THREE.MeshLambertMaterial({color, side:THREE.DoubleSide}));
+}
+const cRed = new THREE.Color(0xa8241a), cWhite = new THREE.Color(0xdedede);
+const cGrass = new THREE.Color(0x4d7540), cGrass2 = new THREE.Color(0x466d39);
+scene.add(ribbon(-HALF_W, HALF_W, 0, new THREE.MeshLambertMaterial({map:asphaltTex})));
+scene.add(ribbon(HALF_W-0.55, HALF_W-0.25, 0.03, new THREE.MeshLambertMaterial({color:0xd8d8d8})));
+scene.add(ribbon(-HALF_W+0.25, -HALF_W+0.55, 0.03, new THREE.MeshLambertMaterial({color:0xd8d8d8})));
+// kerbs only where the track actually curves; grass shoulder elsewhere
+const kerbMat = new THREE.MeshLambertMaterial({vertexColors:true});
+const kerbCol = i => Math.abs(sK[i]) > 0.0022 ? ((i/6|0)%2 ? cRed : cWhite) : ((i/25|0)%2 ? cGrass : cGrass2);
+scene.add(ribbon(HALF_W, HALF_W+1.2, 0.05, kerbMat, kerbCol));
+scene.add(ribbon(-HALF_W-1.2, -HALF_W, 0.05, kerbMat, kerbCol));
+const vergeMat = new THREE.MeshLambertMaterial({map:grassTex});
+scene.add(ribbon(HALF_W+1.2, VERGE, 0.02, vergeMat));
+scene.add(ribbon(-VERGE, -HALF_W-1.2, 0.02, vergeMat));
+scene.add(wall(VERGE, 0.1, 0.8, 0x8f959c));   // armco barriers
+scene.add(wall(-VERGE, 0.1, 0.8, 0x8f959c));
+
+{ // embankment skirts from barrier line down to the ground plane
+  const mat = new THREE.MeshLambertMaterial({color:0x66583f, side:THREE.DoubleSide});
+  for (const side of [-1, 1]) {
+    const pos = [], idx = [];
+    for (let i = 0; i < N; i++) {
+      const c = sPos[i], l = sLat[i], o = side*VERGE;
+      const ex = c.x+l.x*o, ez = c.z+l.z*o;
+      pos.push(ex, c.y+0.1, ez, ex, GROUND_Y, ez);
+      const a = i*2, b = ((i+1)%N)*2;
+      idx.push(a, b, a+1, b, b+1, a+1);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    scene.add(new THREE.Mesh(g, mat));
+  }
+}
+{ // rolling terrain, kept flat in a corridor around the track
+  const seg = 120, size = 6000;
+  const g = new THREE.PlaneGeometry(size, size, seg, seg);
+  g.rotateX(-Math.PI/2);
+  const hash = (ix, iz) => { const s = Math.sin(ix*127.1 + iz*311.7)*43758.5453; return s - Math.floor(s); };
+  const vnoise = (x, z) => {
+    const ix = Math.floor(x), iz = Math.floor(z), fx = x-ix, fz = z-iz;
+    const sx = fx*fx*(3-2*fx), sz = fz*fz*(3-2*fz);
+    const a = hash(ix,iz), b = hash(ix+1,iz), c = hash(ix,iz+1), d = hash(ix+1,iz+1);
+    return a + (b-a)*sx + (c-a)*sz + (a-b-c+d)*sx*sz;
+  };
+  const coarse = [];
+  for (let i = 0; i < N; i += 8) coarse.push(sPos[i]);
+  const p = g.attributes.position, cols = new Float32Array(p.count*3);
+  const c1 = new THREE.Color(0x4a7537), c2 = new THREE.Color(0x5f8c45), c3 = new THREE.Color(0x77804d), cc = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    let dmin = 1e9;
+    for (const s of coarse) {
+      const dx = x - s.x, dz = z - s.z, d = dx*dx + dz*dz;
+      if (d < dmin) dmin = d;
+    }
+    dmin = Math.sqrt(dmin);
+    const fade = THREE.MathUtils.smoothstep(dmin, 60, 420);
+    const n = vnoise(x/380, z/380)*0.72 + vnoise(x/95, z/95)*0.28;
+    const h = GROUND_Y + fade*Math.max(n - 0.3, 0)*90;
+    p.setY(i, h);
+    cc.copy(c1).lerp(c2, vnoise(x/47, z/47));
+    if (h > 18) cc.lerp(c3, Math.min(1, (h-18)/30)*0.55);
+    cols[i*3] = cc.r; cols[i*3+1] = cc.g; cols[i*3+2] = cc.b;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+  g.computeVertexNormals();
+  const tex = groundDetail.clone(); tex.needsUpdate = true; tex.repeat.set(700, 700);
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({map:tex, vertexColors:true}));
+  m.position.y = -0.05;
+  m.receiveShadow = true;
+  scene.add(m);
+}
+{ // start line + gantry
+  const c = sPos[0], l = sLat[0], t = sTan[0];
+  const pos = [];
+  for (const [o, d] of [[-HALF_W,0],[HALF_W,0],[-HALF_W,1],[HALF_W,1]])
+    pos.push(c.x+l.x*o+t.x*d*2, c.y+l.y*o+0.08, c.z+l.z*o+t.z*d*2);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex([0,1,2,1,3,2]);
+  g.computeVertexNormals();
+  scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:0xffffff})));
+  const gy = new THREE.Group();
+  const gmat = new THREE.MeshLambertMaterial({color:0x30343b});
+  const span = HALF_W + 2.2;
+  for (const x of [-span, span]) {
+    const pl = new THREE.Mesh(new THREE.BoxGeometry(0.7, 7.5, 0.7), gmat);
+    pl.position.set(x, 3.75, 0); gy.add(pl);
+  }
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(span*2 + 0.7, 1.3, 1.0), gmat);
+  beam.position.y = 7.4; beam.castShadow = true; gy.add(beam);
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(5, 0.9, 0.06), new THREE.MeshBasicMaterial({color:0xe8e8e8}));
+  panel.position.set(0, 7.4, 0.56); gy.add(panel);
+  const lh = Math.hypot(l.x, l.z);
+  gy.position.copy(c);
+  gy.rotation.y = Math.atan2(-l.z/lh, l.x/lh);
+  scene.add(gy);
+}
+function scatter(count, dMin, dMax, place) { // rejection-sampled positions along the track sides
+  let placed = 0, guard = 0;
+  while (placed < count && guard++ < count*14) {
+    const i = (Math.random()*N)|0, side = Math.random() < 0.5 ? -1 : 1;
+    const d = dMin + Math.random()*(dMax - dMin);
+    const c = sPos[i], l = sLat[i];
+    const x = c.x + l.x*side*d, z = c.z + l.z*side*d;
+    let ok = true;
+    for (let j = 0; j < N; j += 6) {
+      const dx = x - sPos[j].x, dz = z - sPos[j].z;
+      if (dx*dx + dz*dz < (VERGE+4)*(VERGE+4)) { ok = false; break; }
+    }
+    if (!ok) continue;
+    const slope = Math.min(1, (d - VERGE)/55);
+    const y = c.y + (GROUND_Y - c.y)*slope*0.9 - 0.5;
+    place(placed, x, y, z);
+    placed++;
+  }
+  return placed;
+}
+{ // conifer forest (instanced)
+  const trunkG = new THREE.CylinderGeometry(0.22, 0.38, 3.2, 6); trunkG.translate(0, 1.6, 0);
+  const folG = new THREE.ConeGeometry(2.8, 8, 7); folG.translate(0, 6.6, 0);
+  const COUNT = 800;
+  const trunks = new THREE.InstancedMesh(trunkG, new THREE.MeshLambertMaterial({color:0x59462f}), COUNT);
+  const folMats = [0x24451f, 0x2d5526, 0x1e3a1a].map(cl => new THREE.MeshLambertMaterial({color:cl}));
+  const fols = folMats.map(mm => new THREE.InstancedMesh(folG, mm, COUNT));
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0), folN = [0, 0, 0];
+  const placed = scatter(COUNT, VERGE+5, VERGE+50, (k, x, y, z) => {
+    const s = 0.7 + Math.random()*0.9;
+    q.setFromAxisAngle(up, Math.random()*6.28);
+    m.compose(v.set(x, y, z), q, sc.set(s, s*(0.85 + Math.random()*0.4), s));
+    trunks.setMatrixAt(k, m);
+    const b = (Math.random()*3)|0;
+    fols[b].setMatrixAt(folN[b]++, m);
+  });
+  trunks.count = placed; trunks.castShadow = true;
+  scene.add(trunks);
+  fols.forEach((f, i) => { f.count = folN[i]; f.castShadow = true; scene.add(f); });
+}
+{ // bushes near the barriers
+  const bG = new THREE.SphereGeometry(1, 7, 5); bG.translate(0, 0.5, 0);
+  const bush = new THREE.InstancedMesh(bG, new THREE.MeshLambertMaterial({color:0x2f5227}), 260);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+  bush.count = scatter(260, VERGE+2, VERGE+18, (k, x, y, z) => {
+    const s = 0.8 + Math.random()*1.3;
+    q.setFromAxisAngle(up, Math.random()*6.28);
+    m.compose(v.set(x, y+0.2, z), q, sc.set(s, s*0.6, s));
+    bush.setMatrixAt(k, m);
+  });
+  bush.castShadow = true;
+  scene.add(bush);
+}
+{ // puffy clouds (instanced squashed spheres) + distant ridge cones
+  const cG = new THREE.SphereGeometry(1, 8, 6);
+  const clouds = new THREE.InstancedMesh(cG, new THREE.MeshLambertMaterial({color:0xf4f7fa, fog:false}), 54);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3();
+  let k = 0;
+  for (let i = 0; i < 13; i++) {
+    const cx = (Math.random()-0.5)*3600 + 100, cz = (Math.random()-0.5)*3600 - 380;
+    const cy = 280 + Math.random()*180, base = 26 + Math.random()*30;
+    const nb = 3 + (Math.random()*2|0);
+    for (let j = 0; j < nb && k < 54; j++) {
+      const s = base*(0.6 + Math.random()*0.8);
+      m.compose(v.set(cx + (Math.random()-0.5)*base*3.2, cy + (Math.random()-0.5)*base*0.5, cz + (Math.random()-0.5)*base*2),
+                q, sc.set(s*1.9, s*0.55, s*1.2));
+      clouds.setMatrixAt(k++, m);
+    }
+  }
+  clouds.count = k;
+  scene.add(clouds);
+  const mat = new THREE.MeshLambertMaterial({color:0x51705a});
+  for (let i = 0; i < 8; i++) {
+    const ang = i/8*6.28 + Math.random()*0.5;
+    const r = 1400 + Math.random()*700;
+    const h = new THREE.Mesh(new THREE.ConeGeometry(280 + Math.random()*420, 100 + Math.random()*160, 7), mat);
+    h.position.set(100 + Math.cos(ang)*r, GROUND_Y, -380 + Math.sin(ang)*r);
+    scene.add(h);
+  }
+}
+
+// ================= ENVIRONMENT REFLECTIONS =================
+// one static cube capture of the finished world = glossy paint & glass
+const cubeRT = new THREE.WebGLCubeRenderTarget(128, {generateMipmaps:true, minFilter:THREE.LinearMipmapLinearFilter});
+const cubeCam = new THREE.CubeCamera(0.5, 2300, cubeRT);
+{
+  const sp = sPos[Math.floor(N*0.985)];
+  cubeCam.position.set(sp.x, sp.y + 3, sp.z);
+  scene.add(cubeCam);
+  cubeCam.update(renderer, scene);
+}
+const envMap = cubeRT.texture;
+
+// ================= CAR (lofted 911 GT3 RS-style body, red/black livery) =================
+const car = new THREE.Group(), body = new THREE.Group();
+car.add(body);
+const wheels = [];
+let tailMat;
+{
+  const paint = new THREE.MeshStandardMaterial({color:0xffffff, vertexColors:true,
+    metalness:0.35, roughness:0.22, envMap, envMapIntensity:1.0});
+  const glass = new THREE.MeshStandardMaterial({color:0x0b0e12, metalness:1, roughness:0.07,
+    envMap, envMapIntensity:1.25});
+  const trim = new THREE.MeshStandardMaterial({color:0x17181c, metalness:0.4, roughness:0.5, envMap});
+  const RED = new THREE.Color(0xc8151b), BLK = new THREE.Color(0x0e0f12), DRK = new THREE.Color(0x1c1e22);
+  const hullColor = (x, y, z) => {
+    if (y < 0.33) return DRK;                                        // sills / lower aero
+    if (z > 2.02 && y < 0.60) return DRK;                            // front fascia intake
+    if (z < -2.25 && y < 0.62) return DRK;                           // rear diffuser zone
+    if (z > 1.12 && z < 2.06 && Math.abs(x) < 0.52 && y > 0.58) return BLK; // black hood
+    if (z > -1.18 && z < -0.66 && Math.abs(x) > 0.72 && y > 0.55 && y < 0.88) return DRK; // side intake
+    return RED;
+  };
+  // superellipse loft: stations nose -> tail
+  function loft(stations, M, colorFn) {
+    const pos = [], col = [], idx = [];
+    const K = stations.length;
+    for (let k = 0; k < K; k++) {
+      const [z, w, y0, y1, nn] = stations[k];
+      const e = 2/nn, ym = (y0+y1)/2, hh = (y1-y0)/2;
+      for (let j = 0; j < M; j++) {
+        const th = j/M*Math.PI*2, cx = Math.cos(th), sy = Math.sin(th);
+        const x = (w/2)*Math.sign(cx)*Math.pow(Math.abs(cx), e);
+        const y = ym + hh*Math.sign(sy)*Math.pow(Math.abs(sy), e);
+        pos.push(x, y, z);
+        const c = colorFn(x, y, z);
+        col.push(c.r, c.g, c.b);
+      }
+    }
+    for (let k = 0; k < K-1; k++)
+      for (let j = 0; j < M; j++) {
+        const a = k*M + j, b = k*M + (j+1)%M, c = (k+1)*M + j, d = (k+1)*M + (j+1)%M;
+        idx.push(a, c, b, b, c, d);
+      }
+    // nose + tail caps
+    const base = pos.length/3;
+    const s0 = stations[0], s1 = stations[K-1];
+    pos.push(0, (s0[2+0], (s0[2]+s0[3])/2), s0[0]); col.push(...Object.values({r:DRK.r,g:DRK.g,b:DRK.b}));
+    pos[pos.length-3] = 0; // (kept explicit below)
+    pos.length -= 3; col.length -= 3;
+    const addCap = (st, front) => {
+      const ci = pos.length/3;
+      pos.push(0, (st[2]+st[3])/2, st[0]);
+      const c = colorFn(0, (st[2]+st[3])/2, st[0]);
+      col.push(c.r, c.g, c.b);
+      const ring = front ? 0 : (K-1)*M;
+      for (let j = 0; j < M; j++) {
+        const a = ring + j, b = ring + (j+1)%M;
+        if (front) idx.push(ci, a, b); else idx.push(ci, b, a);
+      }
+    };
+    addCap(s0, true);
+    addCap(s1, false);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return g;
+  }
+  // [z, width, yBottom, yTop, squareness]
+  const hull = loft([
+    [ 2.32, 1.30, 0.42, 0.62, 3.0],
+    [ 2.15, 1.62, 0.34, 0.70, 3.2],
+    [ 1.85, 1.76, 0.30, 0.76, 3.5],
+    [ 1.45, 1.88, 0.28, 0.86, 3.6],
+    [ 0.90, 1.80, 0.27, 0.80, 3.6],
+    [ 0.00, 1.78, 0.27, 0.78, 3.8],
+    [-0.80, 1.84, 0.27, 0.82, 3.7],
+    [-1.35, 1.98, 0.28, 0.92, 3.5],
+    [-1.90, 1.94, 0.30, 0.97, 3.3],
+    [-2.20, 1.80, 0.34, 1.00, 3.0],
+    [-2.34, 1.55, 0.45, 0.98, 2.6]
+  ], 28, hullColor);
+  const hullMesh = new THREE.Mesh(hull, paint);
+  body.add(hullMesh);
+  const cabin = loft([                       // dark glass canopy incl. black roof
+    [ 0.62, 1.28, 0.76, 0.84, 2.6],
+    [ 0.35, 1.34, 0.78, 1.05, 2.6],
+    [ 0.05, 1.42, 0.78, 1.26, 2.6],
+    [-0.45, 1.44, 0.78, 1.31, 2.6],
+    [-0.95, 1.38, 0.80, 1.18, 2.6],
+    [-1.45, 1.28, 0.84, 0.98, 2.6],
+    [-1.70, 1.12, 0.88, 0.93, 2.4]
+  ], 20, () => BLK);
+  body.add(new THREE.Mesh(cabin, glass));
+  const box = (w,h,d,x,y,z,mat) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    m.position.set(x,y,z); body.add(m); return m;
+  };
+  // splitter, mirrors, exhaust
+  box(1.9, 0.05, 0.55, 0, 0.26, 2.18, trim);
+  box(0.17, 0.09, 0.11, -0.98, 0.92, 0.52, trim);
+  box(0.17, 0.09, 0.11, 0.98, 0.92, 0.52, trim);
+  for (const x of [-0.11, 0.11]) {
+    const e = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.14, 8), trim);
+    e.rotation.x = Math.PI/2; e.position.set(x, 0.33, -2.38); body.add(e);
+  }
+  // swan-neck wing: struts drop from the plank's top side, upturned endplates
+  box(0.06, 0.44, 0.28, -0.45, 1.14, -1.78, trim);
+  box(0.06, 0.44, 0.28, 0.45, 1.14, -1.78, trim);
+  const plank = box(1.94, 0.05, 0.52, 0, 1.36, -1.88, trim);
+  plank.rotation.x = -0.14;
+  box(0.05, 0.24, 0.56, -0.97, 1.42, -1.88, trim);
+  box(0.05, 0.24, 0.56, 0.97, 1.42, -1.88, trim);
+  // lights: oval 911 headlamps + full-width tail light bar
+  const lampMat = new THREE.MeshStandardMaterial({color:0xb9c4cc, metalness:1, roughness:0.15, envMap});
+  for (const x of [-0.60, 0.60]) {
+    const hl = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), lampMat);
+    hl.scale.set(0.17, 0.13, 0.06);
+    hl.position.set(x, 0.70, 2.24);
+    body.add(hl);
+  }
+  tailMat = new THREE.MeshStandardMaterial({color:0x1a0507, emissive:0xff2222, emissiveIntensity:0.7});
+  box(1.6, 0.07, 0.05, 0, 0.93, -2.35, tailMat);
+  // wheels: black tire, dark rim + silver ring accent, spin group inside steer group
+  const tireG = new THREE.CylinderGeometry(0.36, 0.36, 0.30, 20); tireG.rotateZ(Math.PI/2);
+  const rimG = new THREE.CylinderGeometry(0.245, 0.245, 0.335, 14); rimG.rotateZ(Math.PI/2);
+  const ringG = new THREE.TorusGeometry(0.245, 0.014, 6, 24); ringG.rotateY(Math.PI/2);
+  const tireMat = new THREE.MeshStandardMaterial({color:0x0a0a0b, roughness:0.92});
+  const rimMat = new THREE.MeshStandardMaterial({color:0x1c1c20, metalness:0.7, roughness:0.35, envMap});
+  const ringMat = new THREE.MeshStandardMaterial({color:0x8b8f95, metalness:1, roughness:0.25, envMap});
+  for (const [x, z, steers] of [[-0.80,1.45,1],[0.80,1.45,1],[-0.84,-1.42,0],[0.84,-1.42,0]]) {
+    const g = new THREE.Group(), sp = new THREE.Group();
+    sp.add(new THREE.Mesh(tireG, tireMat), new THREE.Mesh(rimG, rimMat));
+    for (const sx of [-0.17, 0.17]) {
+      const r = new THREE.Mesh(ringG, ringMat);
+      r.position.x = sx; sp.add(r);
+    }
+    g.position.set(x, 0.36, z); g.add(sp); body.add(g);
+    wheels.push({g, sp, steers});
+  }
+  body.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  // faint grounding blob under the real shadow
+  const sh = new THREE.Mesh(new THREE.CircleGeometry(2.3, 16),
+    new THREE.MeshBasicMaterial({color:0x000000, transparent:true, opacity:0.14}));
+  sh.rotation.x = -Math.PI/2; sh.position.y = 0.06; sh.scale.y = 0.55;
+  car.add(sh);
+}
+scene.add(car);
+
+// ================= AUDIO (all synthesized, no files) =================
+let AC = null, eng = null;
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  const g = v => { const n = AC.createGain(); n.gain.value = v; return n; };
+  const comp = AC.createDynamicsCompressor();
+  comp.connect(AC.destination);
+  const master = g(0.55); master.connect(comp);
+  // engine voice: harmonic-rich periodic waves (formants + every-3rd-harmonic
+  // firing emphasis = flat-six character), low/high-rpm waves crossfaded,
+  // soft-clipped for exhaust rasp
+  const engineWave = tilt => {
+    const n = 48, re = new Float32Array(n), im = new Float32Array(n);
+    for (let h = 1; h < n; h++) {
+      let a = 1/Math.pow(h, tilt);
+      a *= 1 + 1.1*Math.exp(-Math.pow((h-3)/1.5, 2)) + 0.8*Math.exp(-Math.pow((h-9)/3, 2));
+      if (h % 3 === 0) a *= 1.4;
+      im[h] = a*(h % 2 ? 1 : 0.82);
+    }
+    return AC.createPeriodicWave(re, im);
+  };
+  const bus = g(0);
+  const shaper = AC.createWaveShaper();
+  const curve = new Float32Array(256);
+  for (let i = 0; i < 256; i++) curve[i] = Math.tanh((i/128 - 1)*2.2);
+  shaper.curve = curve;
+  bus.connect(shaper); shaper.connect(master);
+  const mkOsc = (wave, vol) => {
+    const o = AC.createOscillator();
+    o.setPeriodicWave(wave); o.frequency.value = 50;
+    const og = g(vol); o.connect(og); og.connect(bus); o.start();
+    return {o, og};
+  };
+  const low = mkOsc(engineWave(1.7), 0.5);   // mellow low-rpm voice
+  const high = mkOsc(engineWave(1.05), 0.0); // raspy high-rpm voice
+  const sub = AC.createOscillator(); sub.type = 'sine'; sub.frequency.value = 25;
+  const subG = g(0.35); sub.connect(subG); subG.connect(bus); sub.start();
+  const nbuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+  const nd = nbuf.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = Math.random()*2 - 1;
+  const noiseSrc = () => { const n = AC.createBufferSource(); n.buffer = nbuf; n.loop = true; n.start(); return n; };
+  // intake/exhaust hiss
+  const inF = AC.createBiquadFilter(); inF.type = 'bandpass'; inF.Q.value = 0.8;
+  const inG = g(0); noiseSrc().connect(inF); inF.connect(inG); inG.connect(master);
+  // overrun crackle
+  const crF = AC.createBiquadFilter(); crF.type = 'bandpass'; crF.frequency.value = 900; crF.Q.value = 1.2;
+  const crG = g(0); noiseSrc().connect(crF); crF.connect(crG); crG.connect(master);
+  // wind
+  const wF = AC.createBiquadFilter(); wF.type = 'lowpass'; wF.frequency.value = 400;
+  const wG = g(0); noiseSrc().connect(wF); wF.connect(wG); wG.connect(master);
+  // tire screech
+  const scF = AC.createBiquadFilter(); scF.type = 'bandpass'; scF.Q.value = 5;
+  const scG = g(0); noiseSrc().connect(scF); scF.connect(scG); scG.connect(master);
+  eng = {bus, low, high, sub, subG, inF, inG, crG, wF, wG, scF, scG, thSm:0, lastGear:0, cutUntil:0};
+}
+addEventListener('pointerdown', initAudio);
+
+const GEAR_TOPS = [11, 17, 24, 32, 42, 54, 68, 92]; // m/s at redline per gear
+function gearRpm(vLong, throttle) {
+  const v = Math.max(vLong, 0);
+  let gear = 0;
+  while (gear < 7 && v > GEAR_TOPS[gear]) gear++;
+  const lo = gear ? GEAR_TOPS[gear-1] : 0;
+  let r = (v - lo)/(GEAR_TOPS[gear] - lo);
+  if (v < 2) r = throttle*0.6;               // free-revving at standstill
+  return {gear, rpm: 0.10 + 0.90*THREE.MathUtils.clamp(r, 0, 1)};
+}
+function updateAudio(vLong, spd, slip) {
+  const {gear, rpm} = gearRpm(vLong, input.throttle);
+  if (!AC || AC.state !== 'running' || !eng) return;
+  const t = AC.currentTime, T = 0.03;
+  eng.thSm += (input.throttle - eng.thSm)*0.1;
+  let f = 45 + 405*rpm;                       // ~900-9000 rpm firing frequency
+  if (rpm < 0.2) f += (Math.random() - 0.5)*4; // lumpy race idle
+  eng.low.o.frequency.setTargetAtTime(f, t, T);
+  eng.high.o.frequency.setTargetAtTime(f, t, T);
+  eng.sub.frequency.setTargetAtTime(f*0.5, t, T);
+  eng.low.og.gain.setTargetAtTime(0.55*(1 - rpm*0.75), t, T);
+  eng.high.og.gain.setTargetAtTime(0.15 + 0.75*rpm, t, T);
+  eng.subG.gain.setTargetAtTime(0.12 + 0.30*(1 - rpm), t, T);
+  if (gear > eng.lastGear && vLong > 5) eng.cutUntil = t + 0.09; // upshift throttle cut
+  eng.lastGear = gear;
+  const cut = t < eng.cutUntil ? 0.3 : 1;
+  eng.bus.gain.setTargetAtTime(started ? cut*(0.10 + 0.40*(0.35 + 0.65*eng.thSm)*(0.4 + 0.6*rpm)) : 0, t, T);
+  eng.inF.frequency.setTargetAtTime(f*2 + 300, t, T);
+  eng.inG.gain.setTargetAtTime(0.20*eng.thSm*rpm, t, T);
+  // pops and bangs on overrun
+  if (started && eng.thSm < 0.15 && rpm > 0.45 && Math.random() < 0.22) {
+    const a = 0.15 + Math.random()*0.25;
+    eng.crG.gain.setValueAtTime(a, t);
+    eng.crG.gain.exponentialRampToValueAtTime(0.001, t + 0.03 + Math.random()*0.05);
+  }
+  eng.wF.frequency.setTargetAtTime(300 + spd*6, t, 0.1);
+  eng.wG.gain.setTargetAtTime(Math.pow(Math.min(spd/85, 1), 2)*0.4, t, 0.1);
+  eng.scF.frequency.setTargetAtTime(700 + Math.abs(slip)*40, t, 0.05);
+  eng.scG.gain.setTargetAtTime(THREE.MathUtils.clamp((Math.abs(slip) - 3.5)/5, 0, 1)*0.4, t, 0.05);
+}
+
+// ================= INPUT =================
+const input = {steer:0, throttle:0, brake:0, hand:false, reset:false, mode:'KEYBOARD'};
+const keys = {};
+let started = false;
+addEventListener('keydown', e => { keys[e.code] = true; input.mode = 'KEYBOARD'; initAudio(); startGame(); });
+addEventListener('keyup', e => keys[e.code] = false);
+
+const wheelCal = {axes:null, pedals:[]};
+function pollGamepad() {
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const g of gps) if (g && g.connected) { gp = g; break; }
+  if (!gp) return null;
+  const isWheel = /wheel|g25|g27|g29|g920|g923|dfgt|t150|t248|t300|t500|tmx|fanatec|momo|driving force/i.test(gp.id);
+  const dz = (v, d) => Math.abs(v) < d ? 0 : (v - Math.sign(v)*d)/(1-d);
+  const out = {kind: isWheel ? 'WHEEL' : 'GAMEPAD', steer:0, th:0, br:0, hand:false, reset:false, active:false};
+
+  if (isWheel) {
+    // wider deadzone + gentle expo curve for 900-degree wheels
+    const s = dz(gp.axes[0]||0, 0.06);
+    out.steer = THREE.MathUtils.clamp(Math.sign(s)*Math.pow(Math.abs(s), 1.25)*1.8, -1, 1);
+    // pedal axes auto-detect: first axis to move = throttle, second = brake
+    if (!wheelCal.axes || wheelCal.axes.length !== gp.axes.length) {
+      wheelCal.axes = gp.axes.map(v => ({init:v, min:v, max:v, moved:false, rest:v}));
+      wheelCal.pedals = [];
+    }
+    for (let i = 1; i < gp.axes.length; i++) {
+      const a = wheelCal.axes[i], v = gp.axes[i];
+      a.min = Math.min(a.min, v); a.max = Math.max(a.max, v);
+      if (!a.moved && a.max - a.min > 0.3) { a.moved = true; a.rest = a.init; wheelCal.pedals.push(i); }
+    }
+    const pedal = ax => {
+      if (ax == null) return 0;
+      const a = wheelCal.axes[ax], range = Math.abs(a.rest) > 0.5 ? 2 : 1;
+      return THREE.MathUtils.clamp(Math.abs(gp.axes[ax] - a.rest)/range, 0, 1);
+    };
+    if (wheelCal.pedals.length) {
+      out.th = pedal(wheelCal.pedals[0]);
+      out.br = pedal(wheelCal.pedals[1]);
+    } else { // no pedal axes seen yet: button fallback
+      out.th = (gp.buttons[7] && gp.buttons[7].value) || (gp.buttons[0] && gp.buttons[0].pressed ? 1 : 0);
+      out.br = (gp.buttons[6] && gp.buttons[6].value) || (gp.buttons[1] && gp.buttons[1].pressed ? 1 : 0);
+    }
+    out.hand = !!(gp.buttons[2] && gp.buttons[2].pressed);
+  } else {
+    // PlayStation-style pad, standard mapping
+    out.steer = dz(gp.axes[0]||0, 0.12);
+    out.th = gp.buttons[7] ? gp.buttons[7].value : 0;      // R2
+    out.br = gp.buttons[6] ? gp.buttons[6].value : 0;      // L2
+    out.hand = !!(gp.buttons[0] && gp.buttons[0].pressed); // X (cross)
+  }
+  out.reset = !!(gp.buttons[3] && gp.buttons[3].pressed);
+  out.active = Math.abs(out.steer) > 0.05 || out.th > 0.05 || out.br > 0.05 || out.hand ||
+               gp.buttons.some(b => b.pressed);
+  return out;
+}
+
+function readInput(dt) {
+  const gp = pollGamepad();
+  if (gp && gp.active) { input.mode = gp.kind; startGame(); }
+  if (input.mode !== 'KEYBOARD' && gp) {
+    input.steer = gp.steer; input.throttle = gp.th; input.brake = gp.br;
+    input.hand = gp.hand; input.reset = gp.reset;
+  } else {
+    const t = ((keys.ArrowLeft||keys.KeyA) ? -1 : 0) + ((keys.ArrowRight||keys.KeyD) ? 1 : 0);
+    input.steer += THREE.MathUtils.clamp(t - input.steer, -dt*(t ? 4.5 : 8), dt*(t ? 4.5 : 8));
+    if (Math.abs(input.steer) < 0.02 && !t) input.steer = 0;
+    input.throttle = (keys.ArrowUp||keys.KeyW) ? 1 : 0;
+    input.brake = (keys.ArrowDown||keys.KeyS) ? 1 : 0;
+    input.hand = !!keys.Space;
+    input.reset = !!keys.KeyR;
+  }
+  modeEl.textContent = input.mode + (input.mode === 'WHEEL' && !wheelCal.pedals.length ? ' (pedals: buttons)' : '');
+}
+
+// ================= STATE / PHYSICS =================
+const st = {
+  x:0, y:0, z:0, heading:0, vx:0, vz:0, idx:0, _prevProg:0,
+  lap:0, lapStart:0, best:null, halfway:false, timing:false, _now:0
+};
+const tf = {c:new THREE.Vector3(), l:new THREE.Vector3(), t:new THREE.Vector3()}; // interpolated track frame
+function placeAt(i) {
+  const c = sPos[i], t = sTan[i];
+  st.x = c.x; st.z = c.z; st.y = c.y;
+  st.heading = Math.atan2(t.x, t.z);
+  st.vx = st.vz = 0; st.idx = i;
+  tf.c.copy(c); tf.l.copy(sLat[i]); tf.t.copy(t);
+}
+placeAt(Math.floor(N*0.985));
+
+function nearestIdx() {
+  let best = st.idx, bd = Infinity;
+  for (let j = -30; j <= 30; j++) {
+    const i = (st.idx + j + N) % N;
+    const dx = st.x - sPos[i].x, dz = st.z - sPos[i].z;
+    const d = dx*dx + dz*dz;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+function trackFrame() { // interpolate between samples so the surface is continuous, not stair-stepped
+  let i = st.idx, j = (i+1)%N;
+  let ex = sPos[j].x - sPos[i].x, ez = sPos[j].z - sPos[i].z;
+  let u = ((st.x - sPos[i].x)*ex + (st.z - sPos[i].z)*ez)/(ex*ex + ez*ez);
+  if (u < 0) {
+    j = i; i = (i-1+N)%N;
+    ex = sPos[j].x - sPos[i].x; ez = sPos[j].z - sPos[i].z;
+    u = ((st.x - sPos[i].x)*ex + (st.z - sPos[i].z)*ez)/(ex*ex + ez*ez);
+  }
+  u = THREE.MathUtils.clamp(u, 0, 1);
+  tf.c.copy(sPos[i]).lerp(sPos[j], u);
+  tf.l.copy(sLat[i]).lerp(sLat[j], u);
+  tf.t.copy(sTan[i]).lerp(sTan[j], u).normalize();
+}
+
+let drift = 0; // smoothed lateral slip, for body-roll visual + screech
+function physics(dt) {
+  if (input.reset) { placeAt(nearestIdx()); return; }
+  st.idx = nearestIdx();
+  trackFrame();
+  const c = tf.c, l = tf.l, tan = tf.t;
+  const dx = st.x - c.x, dz = st.z - c.z;
+  const off = (dx*l.x + dz*l.z)/(l.x*l.x + l.z*l.z); // signed lateral offset on banked surface
+  const onGrass = Math.abs(off) > HALF_W + 0.7;
+  if (Math.abs(off) > 30) { placeAt(st.idx); return; }  // fell way off: auto reset
+  st.y = c.y + off*l.y;
+
+  const fx = Math.sin(st.heading), fz = Math.cos(st.heading);
+  const rx = -fz, rz = fx; // right vector in xz
+  let vLong = st.vx*fx + st.vz*fz;
+  let vLat = st.vx*rx + st.vz*rz;
+  const spd = Math.hypot(st.vx, st.vz);
+
+  const surf = onGrass ? 0.35 : 1;
+  // lateral grip rises with speed = aero downforce
+  const latAcc = Math.min(13 + 0.0055*spd*spd, 40) * surf * (input.hand ? 0.22 : 1);
+
+  // steering: bicycle-model yaw, clamped by available grip (1.15 margin = quick rotation / slight oversteer)
+  const delta = input.steer * 0.42/(1 + spd*0.028);
+  let yaw = vLong/2.5 * Math.tan(delta);
+  const maxYaw = latAcc*1.15/Math.max(Math.abs(vLong), 4);
+  yaw = THREE.MathUtils.clamp(yaw, -maxYaw, maxYaw);
+  if (input.hand) yaw += input.steer * Math.min(spd*0.06, 1.6); // handbrake rotation
+  st.heading -= yaw * dt * Math.min(1, spd/3);
+
+  // longitudinal
+  let aLong = 0;
+  const traction = surf/(1 + 0.10*Math.abs(vLat)); // traction-circle lite: sliding cuts drive
+  if (input.throttle && !input.hand) aLong += input.throttle * 21 * Math.max(0, 1 - vLong/78) * traction;
+  if (input.brake) {
+    if (vLong > 0.5) aLong -= input.brake * 34 * surf;
+    else aLong -= input.brake * 8; // reverse
+  }
+  if (vLong < -12) aLong = Math.max(aLong, 0);
+  aLong -= vLong*Math.abs(vLong)*0.0018 + vLong*0.12;   // drag + rolling resistance
+  const tl = Math.hypot(tan.x, tan.z) || 0.01;
+  aLong -= 9.81 * (tan.y/tl) * ((fx*tan.x + fz*tan.z)/tl); // gravity along slope
+  vLong += aLong * dt;
+  if (input.hand && vLong > 0) vLong -= Math.min(vLong, 6*dt);
+
+  // lateral: pull sideways velocity to zero, grip-limited => drift when exceeded
+  vLat += THREE.MathUtils.clamp(-vLat, -latAcc*dt, latAcc*dt);
+
+  const s2 = Math.sin(st.heading), c2 = Math.cos(st.heading);
+  st.vx = s2*vLong - c2*vLat;
+  st.vz = c2*vLong + s2*vLat;
+  st.x += st.vx * dt;
+  st.z += st.vz * dt;
+  drift += (vLat - drift) * Math.min(1, dt*8);
+
+  // lap timing: must pass halfway checkpoint, then cross start line (5 s debounce)
+  const prog = st.idx/N;
+  if (prog > 0.4 && prog < 0.6) st.halfway = true;
+  if (st._prevProg > 0.92 && prog < 0.08 && (!st.timing || st._now - st.lapStart > 5000)) {
+    const now = st._now;
+    if (st.timing && st.halfway) {
+      const t = now - st.lapStart;
+      if (st.best === null || t < st.best) { st.best = t; bestEl.textContent = fmt(t); }
+    }
+    st.lap++; lapEl.textContent = st.lap;
+    st.lapStart = now; st.timing = true; st.halfway = false;
+  }
+  st._prevProg = prog;
+}
+
+// ================= VISUAL UPDATE =================
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion();
+const _vA = new THREE.Vector3(), _vB = new THREE.Vector3(), _vC = new THREE.Vector3();
+function updateCar(dt) {
+  car.position.x = st.x;
+  car.position.z = st.z;
+  car.position.y += (st.y - car.position.y) * Math.min(1, dt*14);
+  _vB.copy(tf.l).cross(tf.t).normalize();                   // surface normal
+  _vC.set(Math.sin(st.heading), 0, Math.cos(st.heading))
+     .projectOnPlane(_vB).normalize();                      // forward, laid on surface
+  _vA.copy(_vB).cross(_vC);
+  _m.makeBasis(_vA, _vB, _vC);
+  _q.setFromRotationMatrix(_m);
+  car.quaternion.slerp(_q, Math.min(1, dt*10));
+  body.rotation.z = drift * 0.02;
+  tailMat.emissiveIntensity = input.brake > 0.1 ? 2.6 : 0.7;
+
+  const vLong = st.vx*Math.sin(st.heading) + st.vz*Math.cos(st.heading);
+  for (const w of wheels) {
+    w.sp.rotation.x += vLong/0.36 * dt;
+    if (w.steers) w.g.rotation.y = -input.steer * 0.45;
+  }
+  // shadow frustum follows the car
+  sun.position.copy(car.position).addScaledVector(SUN_DIR, 350);
+  sun.target.position.copy(car.position);
+  // chase camera: pulls back with speed, exponential smoothing
+  const back = 8.6 + Math.hypot(st.vx, st.vz)*0.05;
+  _vA.set(st.x - Math.sin(st.heading)*back, car.position.y + 3.1, st.z - Math.cos(st.heading)*back);
+  camera.position.lerp(_vA, 1 - Math.exp(-dt*4.5));
+  _vB.set(st.x + Math.sin(st.heading)*4, car.position.y + 1.2, st.z + Math.cos(st.heading)*4);
+  camera.lookAt(_vB);
+}
+
+// ================= UI =================
+const lapEl = document.getElementById('lapN'), lapTEl = document.getElementById('lapT'),
+      bestEl = document.getElementById('bestT'), speedEl = document.getElementById('speed'),
+      modeEl = document.getElementById('mode'), startEl = document.getElementById('start'),
+      gearEl = document.getElementById('gear');
+function fmt(ms) {
+  ms = Math.max(ms, 0);
+  const m = ms/60000|0, s = (ms - m*60000)/1000;
+  return m + ':' + (s < 10 ? '0' : '') + s.toFixed(3);
+}
+const map = document.getElementById('map'), mctx = map.getContext('2d');
+let mapPath, mScale, mOx, mOy;
+{
+  let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+  for (const p of sPos) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+  }
+  const pad = 12;
+  mScale = Math.min((map.width - 2*pad)/(maxX - minX), (map.height - 2*pad)/(maxZ - minZ));
+  mOx = pad - minX*mScale + (map.width - 2*pad - (maxX-minX)*mScale)/2;
+  mOy = pad - minZ*mScale + (map.height - 2*pad - (maxZ-minZ)*mScale)/2;
+  mapPath = new Path2D();
+  for (let i = 0; i <= N; i += 4) {
+    const p = sPos[i%N];
+    i ? mapPath.lineTo(p.x*mScale+mOx, p.z*mScale+mOy) : mapPath.moveTo(p.x*mScale+mOx, p.z*mScale+mOy);
+  }
+}
+function drawMap() {
+  mctx.clearRect(0, 0, map.width, map.height);
+  mctx.strokeStyle = 'rgba(255,255,255,.85)'; mctx.lineWidth = 2.5;
+  mctx.stroke(mapPath);
+  const s0 = sPos[0];
+  mctx.fillStyle = '#ffd24d';
+  mctx.fillRect(s0.x*mScale+mOx-3, s0.z*mScale+mOy-3, 6, 6);
+  mctx.fillStyle = '#e2201c';
+  mctx.beginPath();
+  mctx.arc(st.x*mScale+mOx, st.z*mScale+mOy, 4, 0, 7);
+  mctx.fill();
+}
+
+function startGame() {
+  if (started) return;
+  started = true;
+  startEl.classList.add('hidden');
+  st.lapStart = performance.now();
+}
+
+// ================= LOOP =================
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = THREE.MathUtils.clamp((now - last)/1000, 0.001, 0.05);
+  last = now;
+  readInput(dt);
+  const vLong = st.vx*Math.sin(st.heading) + st.vz*Math.cos(st.heading);
+  if (started) {
+    st._now = now;
+    physics(dt);
+    lapTEl.textContent = st.timing ? fmt(now - st.lapStart) : '--:--.---';
+  }
+  updateCar(dt);
+  const spd = Math.hypot(st.vx, st.vz);
+  updateAudio(vLong, spd, drift);
+  const {gear} = gearRpm(vLong, input.throttle);
+  gearEl.textContent = spd < 0.5 ? 'N' : (vLong < 0 ? 'R' : 'G' + (gear+1));
+  speedEl.childNodes[0].nodeValue = Math.round(spd*3.6);
+  drawMap();
+  renderer.render(scene, camera);
+}
+updateCar(1); // snap camera behind car before first frame
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
